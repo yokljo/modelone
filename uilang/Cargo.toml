@@ -1,0 +1,11 @@
+[package]
+name = "uilang"
+version = "0.1.0"
+authors = ["Joshua Worth <kemblesoft@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+uilang_impl = {path = "uilang_impl", version = "*"}
+
+[features]
+nightly = ["uilang_impl/nightly"]

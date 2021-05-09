@@ -1,0 +1,9 @@
+[package]
+name = "test1"
+version = "0.1.0"
+authors = ["Joshua Worth <kemblesoft@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+modelone = {path = "../modelone", version = "*"}
+uione = {path = "../uione", version = "*"}

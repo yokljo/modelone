@@ -1,0 +1,672 @@
+Rust Model One
+--------------
+
+This project is an attempt to implement a friendly undoable model technique in
+Rust.
+
+
+Dependencies on non-descendent parts of the model
+-------------------------------------------------
+
+If for example I had a model with a list of things, then somewhere else I had
+an integer which referred to a specific item of that list, I would want that
+integer to be updated automatically when the list changes:
+
+struct Model {
+	list: Vec<Thing>,
+	ref: usize,
+}
+
+The `list` entry cannot update the `ref` entry when it changes, because the list
+doesn't know a thing about the ref, since it is a different part of the
+uni-directional tree. This means the ref could only be automatically updated
+while the model was in a Manager. Managers support views, and in general a view
+attached to the model should not be responsible for updating ref, because what
+happens when you add two window views to the manager, and they both want to
+update the ref. A solution could be to have exactly one "view" - which might not
+necessarily be a user-interface - that is always loaded into the Manager for
+Model which is reponsible for seeing changes to list, and updating ref
+accordingly. Such a view should be the first to recieve changes, and really it
+should be adding changes to the current transaction, so it would have to be a
+special "validation" stage in the Manager which meets those requirements.
+
+
+Tree view
+---------
+
+A good example of something in a UI is a tree view, which represents data from a
+model. Internally a tree view would probably maintain a partial copy of the data
+in the model. It might accept a specific variation of VecChange that allows
+entire ranges of elements to be added, removed or moved. If a Vec that uses
+VecChange wanted to be displayed in that tree view, there would be a method of
+converting a VecChange to a RangeVecChange and vice versa. This conversion would
+lose information because VecChange doesn't support moving, but it is just to get
+the view to work, and that information was never there in the first place.
+
+----
+
+In Qt you can connect signals to arbitrary slots. This gives a lot of freedom,
+but also allows for many possible accidental bugs if an algorithm calls a
+function which emits a signal, which is connected to a slot that somehow comes
+around and breaks the data your algorithm is working on. These bugs are
+sometimes very hard to find and very hard to fix.
+In Rust, if I follow the immutability rules, this kind of connection would be
+illegal. That is what the listener-on-the-entire-model pattern gives you. The
+problem is that as soon as something in a view tries to not represent the model
+tree 1:1 then it becomes a pain to forward signals.
+
+
+Separation of model and view
+----------------------------
+
+Say there is a window with a text box, and the text box displays a string from
+the model. If the user edits that text box, either:
+1. The change will be properly applied to the model when the user presses enter
+   or clicks out of the text box, which requires that the text box stores its
+   own copy of the string in the model.
+2. Changes will be applied to the model as the user types, which means the text
+   box could just use the data from the model directly.
+
+For option #2 and #1 to both work, the text box would have to be designed so
+that the model can come from either the real model, or a temporary model stored
+with the text box itself.
+
+Imagine there is now a window similar as above, but with two text boxes based on
+the same shared model. If using mode #2, every character typed in one text box
+would immediately appear in the other text box. But some things don't make sense
+to share in this situation, like the cursor position/selection, widget focus,
+text box background colour, etc. So if it was only the string that was to be
+shared, it would have to be singled out somehow.
+
+Perhaps for something like the cursor position/selection, it would make sense
+for the shared model to somehow store the latest cursor range from the last text
+box used to modify that string. If any of the text boxes with that model are in
+focus when undo is pressed, the cursor range would be updated to the appropriate
+value.
+
+Another thing to consider is what happens when there are programmatic changes to
+the text box's model while it has focus. The cursor position would have to
+update according to that, but if a change is due to pressing undo, the cursor
+range would have to update to what if was before that change.
+
+Given the above information, I think use #2 is way too complicated, and #1 makes
+a lot more sense. Storing a copy of the model's String and copying it over the
+top when focus is lost or the user presses enter is definitely the easiest way
+to go. The text box can easily have its own History object around the String and
+cursor start/end positions, and provide helper functions for clearing the text
+box history and setting its string.
+
+It is possible that the text box could be split up into two structs, one for
+visual information and another for the text and cursor range, and if multiple
+text boxes use the same model it would just be a bit weird.
+
+Another thing that could be done with method #1 is that all changes to the text
+box's string could be immediately applied to the shared model, so all text boxes
+with the same model will update immediately, but everything else will remain
+unshared. With this method, the programmer would have to be careful not to apply
+the change that happens to the model back to the text box, creating an infinite
+loop. Basically, check if the string has actually changed, then apply it.
+
+
+Gui reference problems
+----------------------
+
+Often a UI really does need to keep track of a specific object for things like
+keyboard focus, the current widget hovered with the mouse or when a widget runs
+something on a timer or in a different thread, and needs to be signalled at some
+arbitrary time in the future. Such a signal should go into the event loop and be
+processed synchonously.
+
+If the referee object ceases to exist, the referer must be notified somehow, and
+the signal should not be propagated to the object (since it isn't there).
+
+This should be designed to be as simple as possible to implement, so it can be
+freely used to animate any values in the UI (and many other uses).
+
+----
+
+A good solution might be for a widget to ask its ApplyContext for a "handle",
+which might be represented as a simple usize. Say you wanted to set a timer on a
+text field that triggers every 1 second, and it needs to notify the text field
+that the timer is done. The problem is that the text field can't store its
+absolute path from the Manager, since it doens't know the manager exists. The
+solution is that the Manager stores a mapping of usize -> absolute-path signals,
+and when a widget wants to be notified, it just acquires a unique handle from
+the Manager for the desired signal, and informs the timer about the handle
+rather than the signal. When the timer triggers, it will request the handle to
+be triggered, and the Manager will look it up then send it.
+
+If possible, the signal could come with data sent by the asynchronous task, and
+while the task would only have to know about the TextFieldChange type, Manager
+would automatically construct a new absolute-path signal from the
+TextFieldChange (or TextFieldSignal, whichever makes the most sense).
+
+Perhaps to go with the Handle idea should be a mechanism for updating signals or
+changes when their path changes. For example, inserting an element at the start
+of a Vec will offset the path of any objects. Therefore to keep the handle
+up-to-date, handles that store paths to those items will need to be updated via
+some kind of filter. The filter would have to be created via the Watcher type or
+something, because it is passed in while applying a change. It could be
+something like:
+
+let insertIndex = 1;
+updateWith(|signal: VecSignal<ValueSignal>| -> Option<VecSignal<ValueSignal>> {
+	match *signal {
+		VecSignal::Insert{index} if index >= insertIndex => {
+			Some(VecSignal::Insert{index: index + 1})
+		}
+		...
+	}
+	// Don't do anything with the signal
+	None
+})
+
+Maybe the handle signals could be propagated to the correct change via a mutable
+iterator with filters applied to it.
+----
+
+I think there needs to be a simple mechanism for listening to changes to child
+models (and maybe even the current model) and updating parent models
+appropriately.
+
+Consider this QMLish code:
+
+Item root {
+	width: textBox.contentWidth + (textBox.text == "Hello" ? 5 : 0)
+	
+	TextBox textBox {
+		
+	}
+	
+	textBox.width: root.width
+}
+
+In this situation, root.width needs to watch textBox for its Text and
+ContentWidth signals, and update the width, which would send its own signal.
+
+This kind of updating should only happen from child signals, never from parent
+signals. This works with the fact that parents have to pass Watcher types to
+their children, and therefore always know when changes happen to them.
+
+----
+
+A Widget is an Item with properties that should be a reusable component,
+consisting of a tree of Items (any of which can also be Widgets). The Widget is
+responsible for keeping bindings up to date.
+
+
+Rule-breaking changes
+---------------------
+
+The Kate text editor only loads a file up to the number of lines you can see (or
+something close to that), so when you load a big file, it will only load the
+rest into memory once you scroll down. This means there is no undo/redo state
+recorded for those lines when they are added to the model. This is legal because
+adding more lines to the end of the lines array can't affect any changes in the
+undo stack.
+
+This kind of change effectively breaks the rules of the model, so it would need
+to be carefully added in manually. Direct mutable access to the model would be
+required, so perhaps there could be a method in Manager which takes a lambda
+that gets applied to the model to transform it. The method could be marked
+unsafe to strongly discourage its use.
+
+
+UI tree in one struct
+---------------------
+
+If a Widget wants to make a tree of items, one thing it could do is have
+children lists in every item and populate them with the appropriate sub-items.
+This introduces persistent sharing, so another solution would be desirable.
+
+One way to do it might be to have a type which implements the Item trait, and
+just stores lambdas for the various methods. This way it can be created on the
+spot when a Widget is attempted to be traversed. Basically, all Widgets
+implement Item, and when you ask for a Widget's children, a list of items is
+expected, so to fulfill that requirement, temporary wrappers for each child can
+be created on the spot, which would allow the Widget to also describe the
+children of its direct children and so forth.
+
+----
+
+When mark_damaged is called, the scene graph would get the damaged item's id and
+look it up in its item buffer, then compare its entry with the actual state of
+the item. If it needs to update child items, it would use the apply_to_children
+method to iterate all children nodes and apply updates to all child item
+geometry.
+Perhaps for this to work, a mark-and-sweep method would be used for scene graph
+nodes when children disappear from the apply_to_children call. Maybe not.
+The scene graph buffer would probably be a single vector of Option<NodeData>,
+and ids assigned to Items would be just indexes in that array. When an Item
+dies, it would remove itself from the scene graph, and its slot would become
+None, ready to be assigned to another Item later.
+
+----
+
+When applying a function to a tree of Items, it is important to be able to get a
+handle which allows changes to be applied to a specific Item.
+
+Basically, you would pass a lambda to some function:
+apply(&self.rect, |item_change| Rect::item_data(item_change));
+
+----
+
+When creating a changeable struct, it would be nice to be able to specify "just
+signals", that don't require an entry in the struct, but still add an entry in
+the change and signal enums, where if you "apply" the change, all it does is
+emit the signal. This could be used in the ItemData struct to update itself with
+appropriate Manager handles if they are an item that accepts various
+interactions. They could get a handle from the Manager that could be used in
+conjunction with a lambda to create different forms of a signal.
+Eg. an item that awaits mouse clicks etc. would ask for a handle and give it to
+the event loop, then the event loop would go:
+
+get_signal_lambda(ItemSignal::MouseClicked);
+
+and it would be able to use the result to emit a mouse clicked signal to that
+exact item.
+
+----
+
+It would probably make sense to be able to request a lambda function which when
+called would push a change to a queue in the Manager, and would do so in a
+thread-safe way (it would apply the change at the end of the cycle or the start
+of the next one).
+
+fn apply_handle() -> Fn(ArgT);
+
+let ah = cxt.apply_handle();
+// This would magically add a change to the manager's queue regardless of when
+// or where it is called.
+ah(ValueChange(42));
+
+Ideally the handles would be stored in the Manager as well, using an Arc so they
+can be shared around as much as you want.
+
+----
+
+Things could register functions with the Manager that do transformations. The
+functions would gain a revision number, which would match a revision number
+given to apply handles. When an apply handle is called, the manager will use the
+revision number to run the resulting change through all transformation that have
+been registered since the handle was created. When apply handles are dropped,
+they would inform the Manager and it could clean up any transformations that are
+definitely no longer useful. The transform functions would return an Option, so
+it is possible that an attempt to invoke the apply handle could break.
+
+A possible problem with this approach is that if you make an apply handle and
+never drop it, the transformations will build up for the rest of time.
+
+----
+
+Maybe changes should always come with a no-op variant, which could be retrieved
+from the Change trait.
+
+----
+
+The no-op variant of a change could be stored with an apply handle reference in
+the Manager, then when a transform function comes along, it would be applied to
+the no-op change. If the tranform function returns a None, then clearly the
+apply handle is no longer valid. If it returns a Some of a different value to
+which it started at, the transform function will be linked to that apply handle
+until the handle is dropped.
+
+----
+
+During UI initialisation:
+
+1. Iterate over the entire item tree using apply_to_children. This will give all items an internal
+   ID/a cache entry.
+2. Apply reset_view_signals to the entire model tree. Each item will send a new apply handle to the
+   item cache via its ItemCacheInterface, which will be stored with its cache entry.
+
+----
+
+It would be best if apply handles could be updated property without having to stack up changes to be
+applied every time they emit a signal. This would require functionality from every type to support
+such a change.
+
+struct Base {
+	v: Vec<String>
+}
+
+impl_changeable_struct!{Base:
+	v: VecChange<StringChange>,
+}
+
+let m = Manager::new(Base::new());
+// Move index 0 to the current index 3, updating all apply handles appropriately
+m.apply(BaseChange::v(VecChange::Move(0, 3)));
+// Remove index 4, telling apply handles that they are now invalid
+m.apply(BaseChange::v(VecChange::Remove(4)));
+
+// Objects of these would be stored in the Manager.
+trait ApplyHandle<C: Change> {
+	// The manager would pass all incoming changes to this and the apply handle would update itself
+	// if it needs to.
+	fn update(change: &C);
+}
+
+For this to work, apply handles would need to be made from an inspectable "change constructor"
+struct. So basically every change that can contain changes to sub-structs needs to be able to
+be constructed with a special kind of description struct.
+
+trait ChangeConstructor<Parent, Child> {
+	...
+}
+
+struct VecChangeConstructor<T: Change> {
+	index: usize,
+	sub: Box<ChangeConstructor<T, ?>>,
+}
+
+impl<T: Change> ChangeConstructor<VecChange<T>, T> for VecChangeConstructor<VecChange<T>> {
+	fn create(&self, subchange: T) -> VecChange {
+		VecChange::At(self.index, subchange)
+	}
+	
+	// Updates the ChangeConstructor, returns true if the thing the change applied to still exists.
+	fn update(&mut self, change: VecChange<T>) -> bool {
+		match change {
+			VecChange::Move(from, to) if from == self.index => {
+				self.index = to;
+				true
+			}
+			VecChange::Remove(removeindex) => {
+				if self.index == removeindex {
+					false
+				} else if self.index > removeindex {
+					self.index -= 1;
+					true
+				} else {
+					true
+				}
+			}
+			VecChange::At(index, subchange) => {
+				self.sub.update(subchange)
+			}
+			... etc.
+			_ => true
+		}
+	}
+}
+
+// This would be used to terminate a chain of ChangeConstructors. It doesn't matter what changes
+// come in, this change constructor will never be modified.
+struct DirectChangeConstructor<T: Change>;
+
+impl<T: Change> ChangeConstructor<T, T> for DirectChangeConstructor<T> {
+	fn create(&self, change: T) -> T {
+		change
+	}
+	
+	fn update(&mut self, change: T) -> bool {
+		true
+	}
+}
+
+Then there needs to be a way to call an apply handle and have it call create() on all of these
+change constructors and finally get the apply handle's argument into the most nested constructor.
+
+Perhaps using the Any type would work to get the arguments to the DirectChangeConstructor.
+
+----
+
+The change construtors should be stored in the Manager under an ID, then the apply handle will only
+need the ID. This means the apply handles can put leaf changes into a queue, and the manager can
+resolve what paths those IDs refer to when it needs to, which means it can't have async problems.
+
+This creates a second multi-threading problem, which is the garbage collection of the IDs and their
+change constructors when an apply handle dies. The destructor of an apply handle could put a
+different message into the queue to say that it died. Perhaps the channel between the apply handles
+and the Manager should take an enum:
+
+enum Message {
+	// This is the ID of the path, and an Any containing the change, hopefully of the correct type
+	// for the path with that ID. The any value will be passed into the path with the given ID
+	// whenever the Manager wants to resolve it.
+	Apply(usize, Any),
+	// This is put in the queue when the apply handle is dropped. It tells the Manager that the
+	// given ID no longer exists, and it should free the path at that ID, and make the ID available
+	// for others to use the ID.
+	Drop(usize),
+}
+
+----
+
+A possible way to optimise the update process when there are a lot of apply handles would be to give
+ChangeConstructors a way to create a do-nothing change, then give them a way to make a hash for a
+given change. The hash would not change for the change that goes to the placeholder constructor. It
+would simply create a do-nothing change, then hash that change, then use the hash to group different
+constructors together. When a change is applied, it would pass the change into one of the
+constructors each group, then if the hash matches, it will pass it to the update function of
+everything in the group.
+
+If a group gets too big it could even repeat the process with a slightly different hashing
+mechanism. This could work by just making a standard hasher, then pass in the level of the tree as
+the first part of the hash (0 for the root, 1 for the level below the root etc.).
+
+enum Tree<C> {
+	Node(Tree, Tree),
+	Leaf(Box<ChangeConstructor<C>>)
+	VecLeaf(Vec<Box<ChangeConstructor<C>>>)
+}
+
+(instead of storing the constructors in the tree, they could also just be indexes into a Vec)
+
+----
+
+Apply Handles are almost everything required to making a working inter-model reference mechanism.
+The remaining feature required would be a way to get the Manager to invoke a specified apply handle
+when another one becomes invalid (or even updates its position in the model at all).
+
+----
+
+There needs to be a way for items of the same type to share the same geometry on the graphics card
+and instance the geormetry by just passing in different uniform values.
+One way to do this would be to just use Rust's TypeId type as a unique identifier for a specific
+type. The Item trait could have a method like:
+fn share_geometry(&self) -> Option<(TypeId, u64)> { None }
+so the engine would call share_geometry, and if it returns a Some value, it will use the returned
+pair as a unique identifier for the geometry (the u64 lets a single type have multiple shared
+geometries).
+A problem with the above approach may be that TypeId is probably not globally unique between
+compiles, so if you wanted to have a plugin, there is the (very unlikely) situation that two TypeId
+values will collide.
+Another way might be to have a fancy global-register mechanism where you return a &mut to a static
+variable in a library to the global register. If the reference is to a thing that hasn't been
+internally initialised yet then the register will assign it a unique value, and it will have that
+value for the rest of time. Runtime initialisation isn't great, but it's a solution.
+
+----
+
+Animation can be acieved by adding ref-count-up/down messages to ItemUpdateMessage which indicate
+that the item is playing an animation. Every frame that there are any animating items, a new
+AnimationFrame signal will be sent from the main loop to the item, which can be handled by the
+thing that is actually animating.
+A user can ask for an "animation handle" from an item like:
+
+my_item_data.animation_handle();
+
+which on construction would send a ref-count-up signal, and when it is dropped it would send the
+ref-count-down signal. There should be a null version of the animation handle, and a way to disable
+it temporarily so one could do something like:
+
+let mut handle = my_item_data.animation_handle();
+handle = AnimationHandle::empty(); // TODO: Find a better name.
+// Or:
+handle.stop();
+handle.start();
+
+Maybe an animation curve library could have a trait like:
+
+trait Animated {
+	fn start();
+	fn stop();
+}
+
+Then you could use it like:
+
+// Maybe animation_handle() should just return a box...
+let anim = LinearAnimation::new(Box::new(my_item_data.animation_handle()));
+
+A different verison of this is to make an "ItemAnimation" type and allow the main loop to cache it
+with an apply handle like it does with Items, so it can send the frame event to that specific thing:
+
+struct MyItem {
+	item_data: ItemData,
+	anim: ItemAnimation,
+}
+
+impl MyItem {
+	fn new() -> MyItem {
+		let mut item = MyItem {
+			item_data: ItemData::new(),
+			anim: Animation::new(),
+		}
+	}
+	
+	fn update(cxt: &mut ApplyContext<MyItem, MyItemChange>, signal: &MyItemSignal) {
+		if signal == button_was_pressed {
+			cxt.apply(anim(running(ValueChange(true))));
+		}
+		
+		if signal == anim_frame_signal {
+			// Update the animation
+		}
+
+		dispatch_struct_update!{MyItemChange for signal, cxt:
+			item_data,
+			anim,
+		}
+	}
+}
+
+impl Item for MyItem {
+	get_item_impl!(item_data);
+	
+	impl_children!{
+		...
+	}
+	
+	// This would implement a second function which is just for animations.
+	impl_animations!{
+		anim
+	}
+}
+
+// This is friends with Item, and Item is the only thing that should be able to set the handle (so
+// the user shouldn't be manually setting it).
+struct ItemAnimation {
+	handle: Sender<ItemUpdateMessage>,
+	running: bool,
+	// The argument of this signal is the time step
+	frame_signal: Signal<f64>,
+	
+	...
+}
+
+impl ItemAnimation {
+	fn update(cxt, signal) {
+		if signal == running_changed {
+			if cxt.model().running {
+				cxt.model().handle.start();
+			} else {
+				cxt.model().handle.stop();
+			}
+		}
+	}
+}
+
+
+----
+
+To do effects like transparency or blur (or something much fancier) on entire groups of items a new
+feature would be required. One way to do this would be to add more properties to Item like a shader
+to apply to children. Since all Items get a shader anyway, a very simple and flexible approach would
+be to add a property to Items to say that children of the item should be rendered to a texture, then
+that texture's ID would be passed to the containing item's shader, so it can do whatever it wants
+with those pixels in a pixel shader.
+Unlike QML's approach, this method can't render adjacent or otherwise non-children to a texture, but
+I don't think that is necessary to achieve drop shadows or any other effects. In my experience,
+QML's effect overlays can often get the source image bleeding through in semi-transparent pixels,
+making it look ugly.
+
+----
+
+Something QML can do is take snapshots of an item's image. When asking for an item's image a future
+is returned which signals when it is ready, which is clearly because the render thread has to go and
+render the item to a texture then download that texture off the graphics card before it can be
+returned.
+A similar effect is definitely achieveable in this system with some extra work. There could even be
+a dedicated signal on ItemData for when an image is captured into an Arc<Image> or something.
+
+----
+
+Perhaps different rendering backends will be a requirement to allow the UI to display on more
+platforms. A QPainter-like software backend for example would be useful for rendering
+deterministically on any platform. One way different backends could be implemented is by making the
+Item::update_geometry method take an ID (maybe a TypeId) and have it return an Box<Any> of the type
+that particular backend expects. If the Any doesn't cast to the expected, the backend would either
+crash, not display the item, or show a placeholder to indicate the item doesn't have an
+implementation for the current backend.
+
+----
+
+Maybe for a UI to reflect a model, there needs to be a standard way of having Object accepting the
+changes of additional models. Maybe this would be a type argument that is usually an empty tuple,
+but can be an ApplyContext for one or many (using a tuple) models.
+
+----
+
+A Repeater of sorts is a necessary addition to the UI library, and is a prime example of something
+that needs to be able to work on an external model. It needs to both be able to read and write the
+external model, so the model will need to always be passed along using an ApplyContext.
+
+struct Button {
+	model: Vec<String>,
+	// A Repeater will work on Vec with VecChange The arguments are
+	// <Item type, individual model type, model change type>
+	list: Repeater<Label, String, StringChange>,
+}
+
+impl_changeable_struct!{ButtonChange[ButtonSignal] for Button:
+	model: VecChange<String>,
+	list: RepeaterChange<LabelChange, StringChange>,
+}
+
+impl Object for Button {
+	fn update(cxt, signal) {
+		match signal {
+			ButtonSignal::list(sub_signal) => {
+				// Forward signals for the list itself
+				Repeater::update(sub_apply!(cxt, ButtonChange::list), sub_signal, sub_apply!(cxt, ButtonChange::model));
+			}
+			ButtonSignal::model(sub_signal) => {
+				// Forward signals for the model
+				Repeater::update(sub_apply!(cxt, ButtonChange::list), sub_signal, sub_apply!(cxt, ButtonChange::model));
+			}
+		}
+	}
+}
+
+A solution to this problem could be using a termporary model struct that somehow contains a
+reference to the Item and a reference to the model, then the Object for the item would be an
+Object<WrapperStruct<MyItem>> instead, and the ApplyContext for that struct would be passed instead
+of one for modifying the Item directly.
+This approach makes sense because it means MyItem can't exist as an Object without the direct
+pairing to the external model. It also requires no overhead for things that don't depend on an
+external model.
+
+struct ModelView<Model, ModelChange, View, ViewChange> {
+	model: &mut ApplyContext<Model, ModelChange>,
+	view: &mut ApplyContext<View, ViewChange>,
+}
+
+enum ModelViewSignal<ModelSignal, ViewSignal> {
+	Model(ModelSignal),
+	View(ViewSignal),
+}
+
+// Somehow this becomes possible:
+MyItem::update(ModelView::new(sub_apply!(view_cxt....), sub_apply!(model_cxt....)));

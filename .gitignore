@@ -1,0 +1,13 @@
+syntax: glob
+*~
+*.kate-swp
+*/target/*
+target
+.git
+*.lock
+junk
+.directory
+*.trace
+*.old
+.vscode
+vendor

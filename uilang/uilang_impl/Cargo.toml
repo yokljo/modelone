@@ -1,0 +1,20 @@
+[package]
+name = "uilang_impl"
+version = "0.1.0"
+authors = ["Joshua Worth <kemblesoft@gmail.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "0.6"
+proc-macro2 = "0.4.18"
+heck = "0.3.0"
+
+[dependencies.syn]
+version = "0.15.1"
+features = ["full", "extra-traits"]
+
+[features]
+nightly = ["proc-macro2/nightly"]

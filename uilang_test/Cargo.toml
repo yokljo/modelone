@@ -1,0 +1,9 @@
+[package]
+name = "uilang_test"
+version = "0.1.0"
+authors = ["Joshua Worth <kemblesoft@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+uilang = {path = "../uilang", version = "*", features = ["nightly"]}
+modelone = {path = "../modelone", version = "*"}

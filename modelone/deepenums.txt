@@ -1,0 +1,13 @@
+Rust deeply nested enum helper
+------------------------------
+
+enum VecChange<SubChange: Change> {
+	At {
+		index: usize,
+		sub: Nested<SubChange>,
+	}
+}
+
+struct DeepEnum {
+	
+}

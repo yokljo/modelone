@@ -1,0 +1,126 @@
+Once the design of the UI library is stabilised, a QML-like (probably macro-based) lanugage would be
+useful for creating UIs, and even just objects with bindings in general.
+
+// This always makes a brand-new Item, not inheriting from anything else. Since inheritance works
+// quite a lot differently to QML, many things will be quite different.
+// Everything like "Button{...}" within this macro invocation must be Object-implementors, and will
+// go into the same struct at the same level. The "nesting" of the objects only really matters for
+// Objects that are also Items, because it determines their structure.
+item_def!{MyApp:
+	// The require keyword here makes it so that MyApp can't be invoked without passing a MyModel
+	// ApplyContext too.
+	extern my_model: MyModel;
+	// Or to provide a model:
+	// my_model: MyModel = MyModel::new();
+
+	main_button: Button(ButtonChange) {
+		// This would go into the MyApp struct as main_button_state, and will be changeable with
+		// ValueChange<bool>
+		state: bool = false;
+		
+		// If a property has bindings, it can never be assigned to in an event handler etc.
+		text[my_model = root.my_model]: root.my_model.name;
+		
+		// item_data.pos refers to the ValueChange-able type pos in the ItemDataChange-able
+		// item_data field. If it doesn't use ValueChange then bindings like this probably won't
+		// work. The parser would have to detect the use of "state" so it can rename it.
+		// The syntax is: property_to_change[binding, ...] = block_of_code
+		item_data.pos[state] = if state { vec2(50f64, 50f64) } else { vec2(100f64, 50f64) };
+	}
+}
+
+// Without comments:
+
+item_def!{MyApp:
+	extern my_model: MyModel;
+	main_button: Button(ButtonChange) {
+		state: bool = false;
+		text: root.my_model.name;
+		item_data.pos = if state { vec2(50f64, 50f64) } else { vec2(100f64, 50f64) };
+	}
+}
+
+struct MyModel {
+	name: String,
+}
+
+impl_changeable_struct!{MyModelChange[MyModelSignal] for MyModel:
+	name: StringChange,
+}
+
+// Here is the expanded macro:
+
+struct MyApp {
+	item_data: ItemData,
+	main_button: Button,
+	main_button_state: bool,
+}
+
+impl_changeable_struct!{MyAppChange[MyAppSignal] for MyApp:
+	item_data: ItemDataChange,
+	main_button: ButtonChange,
+	main_button_state: ValueChange<bool>,
+}
+
+impl MyApp {
+	fn new() -> MyApp {
+		let mut instance = MyApp {
+			item_data: ItemData::new(),
+			main_button: Button::new(),
+			main_button_state: false,
+		}
+		instance.changeable_apply(instance.binding_change_main_button_item_data_pos());
+		instance
+	}
+	
+	// Gets the change required to update the binding on main_button.item_data.pos
+	fn binding_change_main_button_item_data_pos(&self) -> MyAppChange {
+		let new_value = if state { vec2(50f64, 50f64) } else { vec2(100f64, 50f64) };
+		MyAppChange::main_button(ButtonChange::pos(ValueChange::Set(new_value)))
+	}
+}
+
+impl Object<MyApp, MyAppChange> for MyApp {
+	fn update(cxt: &mut ApplyContext<MyApp, MyAppChange>, signal: &MyAppSignal) {
+		match *signal {
+			MyAppSignal::main_button_state(ValueSignal) => {
+				let change = cxt.get().binding_change_main_button_item_data_pos();
+				cxt.apply(change);
+			}
+		}
+		
+		dispatch_struct_update!{MyAppChange[MyAppSignal] for signal, cxt:
+			item_data: ItemData,
+			main_button: Button,
+		}
+	}
+}
+
+impl Item for MyApp {
+	get_item_impl!(item_data);
+	
+	impl_children!{
+		main_button,
+	}
+}
+
+
+
+-----------------
+
+Functions would also be required:
+
+item_def!{MyApp:
+	// I think if there's a ".", it should have to be renamed...
+	fn calc[state = main_button.state](y: f64) {
+		if state { vec2(50f64, y) } else { vec2(100f64, y) }
+	}
+	main_button: Button(ButtonChange) {
+		state: bool = false;
+		item_data.pos[calc=root.calc] = calc(50.);
+	}
+}
+
+// Rendered:
+
+fn calc(cxt: &mut ApplyContext<MyApp, MyAppChange>)
